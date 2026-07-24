@@ -1,4 +1,4 @@
-# incus-mac — Design & Implementation Plan
+# malleus — Design & Implementation Plan
 
 ## Context
 
@@ -7,12 +7,12 @@ Today the closest option is `colima --runtime incus`, which auto-provisions a Li
 installs Incus — but Colima is shaped around Docker semantics and inherits two specific
 pain points: instances aren't directly reachable from the host, and bind mounts are awkward.
 
-`incus-mac` is a macOS CLI that boots and manages a Linux VM running `incusd`, presented
-**Incus-first**: after `incus-mac start`, the user works with the stock `incus` client
-against a fully configured remote. incus-mac owns only what Incus itself cannot know about
+`malleus` is a macOS CLI that boots and manages a Linux VM running `incusd`, presented
+**Incus-first**: after `malleus start`, the user works with the stock `incus` client
+against a fully configured remote. malleus owns only what Incus itself cannot know about
 — the VM lifecycle, the host↔guest network route, host directory sharing, and TLS trust.
 
-Greenfield: `/home/trog/code/incus-mac` is empty and not yet a git repository.
+Greenfield: `/home/trog/code/malleus` is empty and not yet a git repository.
 
 ## Decisions locked during design
 
@@ -47,7 +47,7 @@ long-term maintainability, which favours Rust.
 ```
 src/main.rs        CLI entrypoint (clap): start, stop, status, delete, mount, unmount
 src/lib.rs         Module declarations; keeps main.rs a thin shell over testable units
-src/config.rs      ~/.incus-mac/config.toml — cpus, memory, disk sizes, mounts, subnets
+src/config.rs      ~/.malleus/config.toml — cpus, memory, disk sizes, mounts, subnets
 src/image/         Download + SHA512-verify + cache Debian genericcloud .raw; lease parsing
 src/pki.rs         Generate/persist client + server TLS keypairs (p256 + x509-cert)
 src/provision.rs   Render cloud-init user-data / meta-data
@@ -74,13 +74,13 @@ enable cross-linking from Linux if that becomes worthwhile.
 ### Boot and provisioning flow
 
 1. **Image** — fetch `debian-13-genericcloud-arm64.raw` (or `amd64`) from `cloud.debian.org`,
-   verify against `SHA512SUMS`, cache under `~/.incus-mac/images/`. Debian publishes `.raw`
+   verify against `SHA512SUMS`, cache under `~/.malleus/images/`. Debian publishes `.raw`
    directly, so no `qemu-img` dependency. Copy-on-write clone to the instance disk and
    `truncate` to the configured size; cloud-init's `growpart`/`resizefs` grows it on boot.
 2. **Pool disk** — create a second sparse raw file as a dedicated block device for the btrfs pool.
    Keeping it separate from the root disk lets the pool be resized or reset independently.
 3. **PKI** — on first run generate a client keypair and a server keypair, persisted in
-   `~/.incus-mac/pki/`. Both public certs are injected via cloud-init, so `incusd` trusts our
+   `~/.malleus/pki/`. Both public certs are injected via cloud-init, so `incusd` trusts our
    client and presents a cert we already pin. This avoids any trust-token exchange at runtime.
 4. **cloud-init** — rendered `user-data` installs the zabbly repo
    (`https://pkgs.zabbly.com/incus/stable`, key from `https://pkgs.zabbly.com/key.asc`),
@@ -90,12 +90,12 @@ enable cross-linking from Linux if that becomes worthwhile.
 5. **Launch** — vfkit invoked with a stable generated MAC:
    ```
    vfkit --cpus N --memory M \
-     --bootloader efi,variable-store=~/.incus-mac/efi-store,create \
+     --bootloader efi,variable-store=~/.malleus/efi-store,create \
      --device virtio-blk,path=root.raw \
      --device virtio-blk,path=pool.raw \
      --device virtio-net,nat,mac=<stable> \
      --device virtio-fs,sharedDir=<host dir>,mountTag=<tag> \
-     --device virtio-vsock,port=5,socketURL=~/.incus-mac/ready.sock \
+     --device virtio-vsock,port=5,socketURL=~/.malleus/ready.sock \
      --cloud-init user-data,meta-data \
      --restful-uri tcp://localhost:<port>
    ```
@@ -105,14 +105,14 @@ enable cross-linking from Linux if that becomes worthwhile.
 7. **Route** — install the host route to the container subnet:
    `route -n add -net <incusbr0 subnet> <vm ip>`. Requires privilege; v1 prompts for `sudo`
    and documents it. Routes do not survive host reboot, so `start` always reconciles.
-8. **Remote** — write/refresh the `incus-mac` remote in the stock client config
+8. **Remote** — write/refresh the `malleus` remote in the stock client config
    (`~/.config/incus/config.yml`) pointing at `https://<vm ip>:8443`, and optionally set it default.
 
 ### Host directory sharing
 
-`incus-mac mount <host-path> [name]` adds a virtio-fs share, mounted in the guest under
+`malleus mount <host-path> [name]` adds a virtio-fs share, mounted in the guest under
 `/mnt/mac/<tag>` via cloud-init fstab. The user then attaches it to an instance with a
-normal `incus config device add ... disk source=/mnt/mac/<tag>`. incus-mac manages the
+normal `incus config device add ... disk source=/mnt/mac/<tag>`. malleus manages the
 host↔guest half only; the guest↔container half stays plain Incus.
 
 ### Error handling
@@ -154,16 +154,16 @@ half-provisioned VM is torn down and rebuilt rather than patched.
 ## Verification
 
 1. `cargo test` — unit suite green; `cargo check --target aarch64-apple-darwin` clean.
-2. `incus-mac start` from a clean `~/.incus-mac` — completes without manual intervention
+2. `malleus start` from a clean `~/.malleus` — completes without manual intervention
    beyond the `sudo` route prompt.
-3. `incus remote list` shows the `incus-mac` remote; `incus list` succeeds against it.
+3. `incus remote list` shows the `malleus` remote; `incus list` succeeds against it.
 4. `incus launch images:debian/13 test` then `incus list` — note the container IP.
 5. **The core acceptance test:** `ping <container-ip>` and `curl` a service on it *directly
    from macOS*, with no port forwarding configured. This is the Colima gap being closed.
-6. `incus-mac mount ~/code`, attach it to `test`, and confirm read/write from inside the
+6. `malleus mount ~/code`, attach it to `test`, and confirm read/write from inside the
    container.
-7. `incus-mac stop` then `start` — remote reconnects and the route is reinstated.
-8. `incus-mac delete` — VM, disks, host route, and remote entry all removed; verify with
+7. `malleus stop` then `start` — remote reconnects and the route is reinstated.
+8. `malleus delete` — VM, disks, host route, and remote entry all removed; verify with
    `netstat -rn` and `incus remote list`.
 
 ## Implementation order

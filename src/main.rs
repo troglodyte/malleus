@@ -5,7 +5,7 @@ use std::{
 };
 
 use clap::{Parser, Subcommand};
-use incus_mac::{
+use malleus::{
     config::{Config, ConfigError},
     pki,
     provision::{self, ProvisionSpec},
@@ -18,9 +18,9 @@ const DEFAULT_READY_PORT: u32 = 5;
 const DEFAULT_RESTFUL_PORT: u16 = 8444;
 
 #[derive(Debug, Parser)]
-#[command(name = "incus-mac", version, about = "Run Incus from macOS through a managed Linux VM")]
+#[command(name = "malleus", version, about = "Run Incus from macOS through a managed Linux VM")]
 struct Cli {
-    /// Path to the incus-mac state directory.
+    /// Path to the malleus state directory.
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
     #[command(subcommand)]
@@ -73,7 +73,7 @@ fn default_state_dir() -> PathBuf {
     std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
-        .join(".incus-mac")
+        .join(".malleus")
 }
 
 fn load_config(state_dir: &Path) -> Result<Config, CliError> {
@@ -117,7 +117,7 @@ fn cmd_start(state_dir: &Path) -> Result<(), CliError> {
     let pki_material = pki::load_or_create(&state_dir.join("pki"))?;
 
     let provision_spec = ProvisionSpec {
-        hostname: "incus-mac".to_string(),
+        hostname: "malleus".to_string(),
         bridge_cidr: DEFAULT_BRIDGE_CIDR.to_string(),
         client_cert_pem: pki_material.client.cert_pem.clone(),
         server_cert_pem: pki_material.server.cert_pem.clone(),
@@ -273,7 +273,7 @@ mod tests {
                 .as_nanos();
             let seq = NEXT.fetch_add(1, Ordering::Relaxed);
 
-            path.push(format!("incus-mac-cli-{prefix}-{}-{stamp}-{seq}", std::process::id()));
+            path.push(format!("malleus-cli-{prefix}-{}-{stamp}-{seq}", std::process::id()));
             fs::create_dir_all(&path).expect("temp test directory should be creatable");
 
             Self { path }
@@ -288,7 +288,7 @@ mod tests {
 
     fn run_with_state_dir(temp: &TempDir, command: &[&str]) -> Result<(), CliError> {
         let mut args = vec![
-            OsString::from("incus-mac"),
+            OsString::from("malleus"),
             OsString::from("--state-dir"),
             temp.path.clone().into_os_string(),
         ];
@@ -299,12 +299,12 @@ mod tests {
 
     #[test]
     fn accepts_the_required_command_surface() {
-        assert!(Cli::try_parse_from(["incus-mac", "start"]).is_ok());
-        assert!(Cli::try_parse_from(["incus-mac", "stop"]).is_ok());
-        assert!(Cli::try_parse_from(["incus-mac", "status"]).is_ok());
-        assert!(Cli::try_parse_from(["incus-mac", "delete"]).is_ok());
-        assert!(Cli::try_parse_from(["incus-mac", "mount", "/tmp/code"]).is_ok());
-        assert!(Cli::try_parse_from(["incus-mac", "unmount", "code"]).is_ok());
+        assert!(Cli::try_parse_from(["malleus", "start"]).is_ok());
+        assert!(Cli::try_parse_from(["malleus", "stop"]).is_ok());
+        assert!(Cli::try_parse_from(["malleus", "status"]).is_ok());
+        assert!(Cli::try_parse_from(["malleus", "delete"]).is_ok());
+        assert!(Cli::try_parse_from(["malleus", "mount", "/tmp/code"]).is_ok());
+        assert!(Cli::try_parse_from(["malleus", "unmount", "code"]).is_ok());
     }
 
     #[test]

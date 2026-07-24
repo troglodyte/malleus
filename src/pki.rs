@@ -72,7 +72,7 @@ pub fn pki_paths(base_dir: &Path) -> PkiPaths {
 fn subject(common_name: &str) -> Result<Name, PkiError> {
     // RFC2253 strings are most-significant RDN first. `Name::from_str` stores
     // them in certificate order, so this text form ends up as C,O,CN.
-    let subject = format!("CN={common_name},O=incus-mac,C=US");
+    let subject = format!("CN={common_name},O=malleus,C=US");
     Name::from_str(&subject).map_err(|err| PkiError::InvalidSubject {
         subject,
         details: err.to_string(),
@@ -157,8 +157,8 @@ pub fn load_or_create(base_dir: &Path) -> Result<PkiMaterial, PkiError> {
 
     fs::create_dir_all(base_dir)?;
 
-    let client = generate_identity("incus-mac-client", 1)?;
-    let server = generate_identity("incus-mac-server", 2)?;
+    let client = generate_identity("malleus-client", 1)?;
+    let server = generate_identity("malleus-server", 2)?;
 
     write_identity(&paths.client_cert, &paths.client_key, &client)?;
     write_identity(&paths.server_cert, &paths.server_key, &server)?;
@@ -192,7 +192,7 @@ mod tests {
                 .as_nanos();
             let seq = NEXT.fetch_add(1, Ordering::Relaxed);
 
-            path.push(format!("incus-mac-{prefix}-{}-{stamp}-{seq}", std::process::id()));
+            path.push(format!("malleus-{prefix}-{}-{stamp}-{seq}", std::process::id()));
             fs::create_dir_all(&path).expect("temp test directory should be creatable");
 
             Self { path }
