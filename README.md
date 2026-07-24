@@ -13,11 +13,13 @@ Current implementation scope:
   - `delete`
   - `mount`
   - `unmount`
+  - `autoconfigure`
 - Reads optional VM config from `~/.malleus/config.toml` (or a custom state dir).
 - On `start`, prepares bootstrap artifacts in the state dir:
   - PKI material (`client.crt`, `client.key`, `server.crt`, `server.key`)
   - cloud-init files (`user-data`, `meta-data`)
   - generated `vfkit.args`
+- On `autoconfigure`, copies local Incus client cert/key and configures the Incus remote.
 
 > Note: this is currently scaffolding/bootstrap wiring. The command surface is in place, but full VM lifecycle execution and remote/route reconciliation are not fully wired yet.
 
@@ -85,10 +87,20 @@ Default state directory is `~/.malleus`.
 
 ```bash
 malleus start
+malleus autoconfigure
 malleus status
 malleus stop
 malleus delete
 ```
+
+Auto-wire Incus client config and remote (after `start`):
+
+```bash
+malleus autoconfigure --vm-ip 192.168.64.5
+```
+
+If your DHCP lease file already contains the VM lease for the default MAC,
+`--vm-ip` can be omitted and `malleus` will auto-detect it.
 
 Use a custom state directory:
 
@@ -115,7 +127,8 @@ Mount/share names must contain only letters, numbers, `-`, `_`, or `.`.
 Current state of the implementation:
 
 - `malleus start` prepares bootstrap artifacts (`user-data`, `meta-data`, `vfkit.args`, and PKI files).
-- Full VM launch, remote wiring, and route reconciliation are still in progress.
+- `malleus autoconfigure` wires local Incus credentials plus the `malleus` remote entry.
+- Full VM launch and route reconciliation are still in progress.
 
 ### Manual flow (today)
 
@@ -132,20 +145,18 @@ Current state of the implementation:
    - run `incus admin init --preseed`,
    - trust the generated `malleus` client certificate.
 
-4. On macOS, point an `incus` client config at the generated client cert/key, then add the remote:
+4. On macOS, wire local Incus config and remote:
 
    ```bash
+   malleus autoconfigure --vm-ip <vm-ip>
    export INCUS_CONF="$HOME/.config/incus-malleus"
-   mkdir -p "$INCUS_CONF"
-   cp ~/.malleus/pki/client.crt "$INCUS_CONF/client.crt"
-   cp ~/.malleus/pki/client.key "$INCUS_CONF/client.key"
-
-   incus remote add malleus https://<vm-ip>:8443 --accept-certificate
-   incus remote switch malleus
    incus list
    ```
 
 Replace `<vm-ip>` with the guest VM IP address.
+
+If `/var/db/dhcpd_leases` contains the VM lease entry for the default MAC,
+you can run `malleus autoconfigure` without `--vm-ip`.
 
 After that, use stock `incus` commands (`incus launch`, `incus exec`, `incus list`, etc.) against the `malleus` remote.
 
