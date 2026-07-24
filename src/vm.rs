@@ -174,4 +174,42 @@ mod tests {
             "missing virtio-fs device for the data share, got: {devices:?}"
         );
     }
+
+    #[test]
+    fn share_devices_are_emitted_before_cloud_init_in_input_order() {
+        let spec = VmSpec {
+            shares: vec![
+                Share {
+                    host_path: PathBuf::from("/Users/me/alpha"),
+                    tag: "alpha".to_string(),
+                },
+                Share {
+                    host_path: PathBuf::from("/Users/me/beta"),
+                    tag: "beta".to_string(),
+                },
+            ],
+            ..spec()
+        };
+
+        let args = build_args(&spec);
+
+        let alpha_idx = args
+            .iter()
+            .position(|arg| arg == "virtio-fs,sharedDir=/Users/me/alpha,mountTag=alpha")
+            .expect("alpha share device should exist");
+        let beta_idx = args
+            .iter()
+            .position(|arg| arg == "virtio-fs,sharedDir=/Users/me/beta,mountTag=beta")
+            .expect("beta share device should exist");
+        let cloud_init_idx = args
+            .iter()
+            .position(|arg| arg == "--cloud-init")
+            .expect("--cloud-init should exist");
+
+        assert!(alpha_idx < beta_idx, "share order should be stable: {args:?}");
+        assert!(
+            beta_idx < cloud_init_idx,
+            "all share devices should precede --cloud-init: {args:?}"
+        );
+    }
 }

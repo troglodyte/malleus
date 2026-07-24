@@ -82,4 +82,36 @@ mod tests {
 
         assert_eq!(found, Some(Ipv4Addr::new(192, 168, 64, 5)));
     }
+
+    #[test]
+    fn returns_none_when_mac_has_no_lease() {
+        let found = find_lease(SAMPLE, "52:54:00:12:34:99");
+
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn returns_none_for_malformed_target_mac() {
+        let found = find_lease(SAMPLE, "not-a-mac");
+
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn ignores_malformed_lease_records_and_keeps_scanning() {
+        let contents = "\
+{
+\tip_address=not-an-ip
+\thw_address=1,52:54:0:12:34:56
+}
+{
+\tip_address=192.168.64.9
+\thw_address=1,52:54:0:12:34:56
+}
+";
+
+        let found = find_lease(contents, "52:54:00:12:34:56");
+
+        assert_eq!(found, Some(Ipv4Addr::new(192, 168, 64, 9)));
+    }
 }

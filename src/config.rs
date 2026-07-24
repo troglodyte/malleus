@@ -21,6 +21,12 @@ pub struct Config {
 pub enum ConfigError {
     #[error("cpus must be at least 1, got {0}")]
     Cpus(u32),
+    #[error("memory_mib must be at least 1, got {0}")]
+    MemoryMiB(u64),
+    #[error("root_disk_gib must be at least 1, got {0}")]
+    RootDiskGiB(u64),
+    #[error("pool_disk_gib must be at least 1, got {0}")]
+    PoolDiskGiB(u64),
 }
 
 impl Config {
@@ -28,6 +34,15 @@ impl Config {
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.cpus == 0 {
             return Err(ConfigError::Cpus(self.cpus));
+        }
+        if self.memory_mib == 0 {
+            return Err(ConfigError::MemoryMiB(self.memory_mib));
+        }
+        if self.root_disk_gib == 0 {
+            return Err(ConfigError::RootDiskGiB(self.root_disk_gib));
+        }
+        if self.pool_disk_gib == 0 {
+            return Err(ConfigError::PoolDiskGiB(self.pool_disk_gib));
         }
         Ok(())
     }
@@ -71,5 +86,69 @@ mod tests {
             err.to_string().contains("cpus"),
             "error should name the offending field, got: {err}"
         );
+    }
+
+    #[test]
+    fn zero_memory_is_rejected() {
+        let cfg = Config {
+            memory_mib: 0,
+            ..Config::default()
+        };
+
+        let err = cfg.validate().expect_err("zero memory must be rejected");
+
+        assert!(
+            err.to_string().contains("memory"),
+            "error should name the offending field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_root_disk_is_rejected() {
+        let cfg = Config {
+            root_disk_gib: 0,
+            ..Config::default()
+        };
+
+        let err = cfg
+            .validate()
+            .expect_err("zero root disk size must be rejected");
+
+        assert!(
+            err.to_string().contains("root_disk"),
+            "error should name the offending field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn zero_pool_disk_is_rejected() {
+        let cfg = Config {
+            pool_disk_gib: 0,
+            ..Config::default()
+        };
+
+        let err = cfg
+            .validate()
+            .expect_err("zero pool disk size must be rejected");
+
+        assert!(
+            err.to_string().contains("pool_disk"),
+            "error should name the offending field, got: {err}"
+        );
+    }
+
+    #[test]
+    fn toml_round_trip_preserves_values() {
+        let cfg = Config {
+            cpus: 8,
+            memory_mib: 8192,
+            root_disk_gib: 40,
+            pool_disk_gib: 120,
+        };
+
+        let toml = toml::to_string(&cfg).expect("config should serialize to TOML");
+        let parsed: Config = toml::from_str(&toml).expect("serialized TOML should parse");
+
+        assert_eq!(parsed, cfg);
     }
 }

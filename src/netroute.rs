@@ -40,4 +40,22 @@ mod tests {
 
         assert_eq!(conflict, None);
     }
+
+    #[test]
+    fn detects_when_existing_route_is_narrower_but_inside_wanted_subnet() {
+        let existing = [net("10.174.0.0/25")];
+
+        let conflict = find_conflict(net("10.174.0.0/24"), &existing);
+
+        assert_eq!(conflict, Some(net("10.174.0.0/25")));
+    }
+
+    #[test]
+    fn exact_same_subnet_is_a_conflict() {
+        let existing = [net("10.174.0.0/24")];
+
+        let conflict = find_conflict(net("10.174.0.0/24"), &existing);
+
+        assert_eq!(conflict, Some(net("10.174.0.0/24")));
+    }
 }
