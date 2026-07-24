@@ -105,18 +105,18 @@ pub fn render_user_data(spec: &ProvisionSpec) -> Result<String, ProvisionError> 
     out.push_str("    content: |\n");
     push_block(&mut out, 6, &spec.server_key_pem);
 
-    out.push_str("  - path: /var/lib/incus-mac/client.crt\n");
+    out.push_str("  - path: /var/lib/malleus/client.crt\n");
     out.push_str("    permissions: \"0644\"\n");
     out.push_str("    content: |\n");
     push_block(&mut out, 6, &spec.client_cert_pem);
 
-    out.push_str("  - path: /var/lib/incus-mac/preseed.yaml\n");
+    out.push_str("  - path: /var/lib/malleus/preseed.yaml\n");
     out.push_str("    permissions: \"0644\"\n");
     out.push_str("    content: |\n");
     push_block(&mut out, 6, &preseed);
 
     if !spec.mounts.is_empty() {
-        out.push_str("  - path: /etc/fstab.d/incus-mac-mounts\n");
+        out.push_str("  - path: /etc/fstab.d/malleus-mounts\n");
         out.push_str("    permissions: \"0644\"\n");
         out.push_str("    content: |\n");
         push_block(&mut out, 6, &fstab_mounts);
@@ -132,9 +132,9 @@ pub fn render_user_data(spec: &ProvisionSpec) -> Result<String, ProvisionError> 
     );
     out.push_str("  - [apt-get, update]\n");
     out.push_str("  - [apt-get, install, -y, incus]\n");
-    out.push_str("  - [sh, -lc, \"incus admin init --preseed < /var/lib/incus-mac/preseed.yaml\"]\n");
+    out.push_str("  - [sh, -lc, \"incus admin init --preseed < /var/lib/malleus/preseed.yaml\"]\n");
     out.push_str(
-        "  - [incus, config, trust, add-certificate, /var/lib/incus-mac/client.crt, --name, incus-mac-client, --type, client]\n",
+        "  - [incus, config, trust, add-certificate, /var/lib/malleus/client.crt, --name, malleus-client, --type, client]\n",
     );
 
     for mount in &spec.mounts {
@@ -151,7 +151,7 @@ pub fn render_user_data(spec: &ProvisionSpec) -> Result<String, ProvisionError> 
 pub fn render_meta_data(spec: &ProvisionSpec) -> Result<String, ProvisionError> {
     validate(spec)?;
     Ok(format!(
-        "instance-id: incus-mac-{}\nlocal-hostname: {}\n",
+        "instance-id: malleus-{}\nlocal-hostname: {}\n",
         spec.hostname, spec.hostname
     ))
 }
@@ -162,7 +162,7 @@ mod tests {
 
     fn spec() -> ProvisionSpec {
         ProvisionSpec {
-            hostname: "incus-mac".to_string(),
+            hostname: "malleus".to_string(),
             bridge_cidr: "10.174.0.1/24".to_string(),
             client_cert_pem: "-----BEGIN CERTIFICATE-----\nCLIENT\n-----END CERTIFICATE-----\n"
                 .to_string(),
@@ -183,7 +183,7 @@ mod tests {
             "zabbly repo should be configured: {user_data}"
         );
         assert!(
-            user_data.contains("incus admin init --preseed < /var/lib/incus-mac/preseed.yaml"),
+            user_data.contains("incus admin init --preseed < /var/lib/malleus/preseed.yaml"),
             "preseed init command should be present: {user_data}"
         );
         assert!(
@@ -202,7 +202,7 @@ mod tests {
 
         assert!(user_data.contains("/var/lib/incus/server.crt"));
         assert!(user_data.contains("/var/lib/incus/server.key"));
-        assert!(user_data.contains("/var/lib/incus-mac/client.crt"));
+        assert!(user_data.contains("/var/lib/malleus/client.crt"));
         assert!(user_data.contains("SERVER"));
         assert!(user_data.contains("KEY"));
         assert!(user_data.contains("CLIENT"));
@@ -214,7 +214,7 @@ mod tests {
 
         assert_eq!(
             meta,
-            "instance-id: incus-mac-incus-mac\nlocal-hostname: incus-mac\n"
+            "instance-id: malleus-malleus\nlocal-hostname: malleus\n"
         );
     }
 
@@ -232,7 +232,7 @@ mod tests {
 
         let user_data = render_user_data(&spec).expect("user-data should render");
 
-        assert!(user_data.contains("path: /etc/fstab.d/incus-mac-mounts"));
+        assert!(user_data.contains("path: /etc/fstab.d/malleus-mounts"));
         assert!(user_data.contains("code /mnt/mac/code virtiofs defaults,_netdev 0 0"));
         assert!(user_data.contains("data /mnt/mac/data virtiofs defaults,_netdev 0 0"));
         assert!(user_data.contains("[mkdir, -p, /mnt/mac/code]"));

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// User-editable settings for the incus-mac VM, read from `~/.incus-mac/config.toml`.
+/// User-editable settings for the malleus VM, read from `~/.malleus/config.toml`.
 ///
 /// Every field is optional in the file; omitted fields fall back to [`Config::default`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
