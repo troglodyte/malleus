@@ -118,8 +118,6 @@ malleus unmount my-tag
 
 Mount/share names must contain only letters, numbers, `-`, `_`, or `.`.
 
-<<<<<<< HEAD
-=======
 ## Using with Incus
 
 `malleus` is designed to keep the normal `incus` CLI front-and-center.
@@ -160,7 +158,6 @@ you can run `malleus autoconfigure` without `--vm-ip`.
 
 After that, use stock `incus` commands (`incus launch`, `incus exec`, `incus list`, etc.) against the `malleus` remote.
 
->>>>>>> refs/remotes/origin/main
 ## Configuration
 
 Optional file: `~/.malleus/config.toml`
