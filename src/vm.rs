@@ -89,9 +89,10 @@ pub fn build_args(spec: &VmSpec) -> Vec<String> {
     args.push("--restful-uri".to_string());
     args.push(format!("tcp://localhost:{}", spec.restful_port));
 
-    args.push("--kernel-cmdline".to_string());
-    args.push("console=hvc0".to_string());
-
+    // No `--kernel-cmdline` here: vfkit only accepts it together with `--kernel`
+    // and `--initrd`, and we boot through EFI off the guest's own bootloader.
+    // The guest still reaches the serial device below by writing to /dev/hvc0
+    // directly, which the virtio-console driver provides regardless of the cmdline.
     if let Some(serial_log) = &spec.serial_log {
         args.push("--device".to_string());
         args.push(format!("virtio-serial,logFilePath={}", path_arg(serial_log)));
@@ -151,10 +152,26 @@ mod tests {
                 "/s/user-data,/s/meta-data",
                 "--restful-uri",
                 "tcp://localhost:8081",
-                "--kernel-cmdline",
-                "console=hvc0",
             ]
         );
+    }
+
+    /// vfkit groups `--kernel`, `--initrd` and `--kernel-cmdline` as all-or-nothing:
+    /// setting one without the others is rejected before the VM starts with
+    /// "if any flags in the group [kernel initrd kernel-cmdline] are set they must
+    /// all be set". We boot via EFI and never supply a kernel or initrd, so the
+    /// cmdline flag must not be emitted at all.
+    #[test]
+    fn efi_boot_omits_the_direct_kernel_boot_flag_group() {
+        let args = build_args(&spec());
+
+        for flag in ["--kernel-cmdline", "--kernel", "--initrd"] {
+            assert!(
+                !args.iter().any(|arg| arg == flag),
+                "{flag} is only valid alongside a direct kernel boot, but the \
+                 bootloader is EFI; vfkit refuses the whole invocation: {args:?}"
+            );
+        }
     }
 
     /// Values of every `--device` flag, in order.

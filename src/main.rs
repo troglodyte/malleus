@@ -104,6 +104,9 @@ enum CliError {
     #[cfg_attr(test, allow(dead_code))]
     #[error("failed to execute `vfkit`: {0}")]
     VfkitExec(std::io::Error),
+    #[cfg_attr(test, allow(dead_code))]
+    #[error("vfkit exited immediately with status {status}: {stderr}")]
+    VfkitExited { status: i32, stderr: String },
     #[error("failed to execute `incus {args}`: {source}")]
     IncusExec {
         args: String,
@@ -233,6 +236,29 @@ fn cmd_start(state_dir: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Grace period for vfkit to reject its arguments before we treat it as booted.
+#[cfg_attr(test, allow(dead_code))]
+const VFKIT_STARTUP_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Poll `child` until it exits or the startup grace period elapses.
+///
+/// `Ok(None)` means it outlived the grace period and is presumed to be booting.
+#[cfg_attr(test, allow(dead_code))]
+fn wait_for_early_exit(
+    child: &mut std::process::Child,
+) -> Result<Option<std::process::ExitStatus>, CliError> {
+    let deadline = std::time::Instant::now() + VFKIT_STARTUP_GRACE;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
 fn start_vm(state_dir: &Path, args: &[String]) -> Result<(), CliError> {
     #[cfg(not(test))]
     {
@@ -247,8 +273,24 @@ fn start_vm(state_dir: &Path, args: &[String]) -> Result<(), CliError> {
                 .stderr(fs::File::create(state_dir.join("vfkit.err"))?)
                 .spawn()
             {
-                Ok(child) => {
+                Ok(mut child) => {
                     fs::write(state_dir.join("vfkit.pid"), child.id().to_string())?;
+                    // vfkit validates its argv before it opens a hypervisor, so an
+                    // unusable invocation fails within milliseconds. Waiting that
+                    // out here turns what would otherwise be a silent 60-second
+                    // IP-discovery timeout into vfkit's own error message. Polling
+                    // also reaps the child, so no zombie is left behind to make
+                    // `is_vm_running` report a VM that never started.
+                    if let Some(status) = wait_for_early_exit(&mut child)? {
+                        let stderr = fs::read_to_string(state_dir.join("vfkit.err"))
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
+                        return Err(CliError::VfkitExited {
+                            status: status.code().unwrap_or(-1),
+                            stderr,
+                        });
+                    }
                     println!("VM is booting (PID: {})", child.id());
                     break;
                 }
@@ -359,27 +401,16 @@ fn cmd_status(state_dir: &Path) -> Result<(), CliError> {
     .iter()
     .all(|path| path.exists());
 
+    // Shares the hardened probe rather than signalling the PID directly, so a
+    // zombie or a recycled PID reports as stopped here too.
     let pid_path = state_dir.join("vfkit.pid");
-    let vm_status = if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let is_alive = std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
-
-            if is_alive {
-                format!("running (PID: {})", pid)
-            } else {
-                "stopped (stale PID file)".to_string()
-            }
-        } else {
-            "stopped (invalid PID file)".to_string()
-        }
-    } else {
-        "stopped".to_string()
+    let vm_status = match fs::read_to_string(&pid_path) {
+        Err(_) => "stopped".to_string(),
+        Ok(pid_str) => match pid_str.trim().parse::<u32>() {
+            Err(_) => "stopped (invalid PID file)".to_string(),
+            Ok(pid) if is_vm_running(state_dir) => format!("running (PID: {pid})"),
+            Ok(_) => "stopped (stale PID file)".to_string(),
+        },
     };
 
     println!("state dir: {}", state_dir.display());
@@ -472,19 +503,47 @@ fn remote_exists(remote_list_csv: &str, remote_name: &str) -> bool {
     })
 }
 
+/// Decide whether a `ps -o stat=,comm=` line describes a live vfkit.
+///
+/// `kill -0` is not enough on its own for two reasons. A vfkit that exits while
+/// malleus is still running stays in the process table as a zombie until it is
+/// reaped, and signalling a zombie succeeds — so a rejected argv looks exactly
+/// like a booting VM. Separately, a `vfkit.pid` left over from a previous host
+/// boot can name a PID the kernel has since reused for something else.
+fn describes_live_vfkit(ps_line: &str) -> bool {
+    let mut fields = ps_line.split_ascii_whitespace();
+
+    let Some(state) = fields.next() else {
+        return false;
+    };
+    // The state column is a code plus optional modifiers, e.g. `S+`; `Z` means
+    // the process is already gone and only its exit status remains.
+    if state.starts_with('Z') {
+        return false;
+    }
+
+    fields.next().is_some_and(|command| command.contains("vfkit"))
+}
+
 fn is_vm_running(state_dir: &Path) -> bool {
     let pid_path = state_dir.join("vfkit.pid");
-    if let Ok(pid_str) = fs::read_to_string(&pid_path) {
-        if let Ok(pid) = pid_str.trim().parse::<u32>() {
-            let status = std::process::Command::new("kill")
-                .args(["-0", &pid.to_string()])
-                .stdout(std::process::Stdio::null())
-                .stderr(std::process::Stdio::null())
-                .status();
-            return matches!(status, Ok(s) if s.success());
+    let Ok(pid_str) = fs::read_to_string(&pid_path) else {
+        return false;
+    };
+    let Ok(pid) = pid_str.trim().parse::<u32>() else {
+        return false;
+    };
+
+    let output = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "stat=,comm="])
+        .output();
+
+    match output {
+        Ok(output) if output.status.success() => {
+            describes_live_vfkit(String::from_utf8_lossy(&output.stdout).trim())
         }
+        _ => false,
     }
-    false
 }
 
 fn query_vfkit_ip(port: u16) -> Option<Ipv4Addr> {
@@ -558,6 +617,7 @@ fn resolve_vm_ip(
     vm_ip: Option<Ipv4Addr>,
     lease_path: &Path,
     state_dir: &Path,
+    vm_is_running: &dyn Fn(&Path) -> bool,
 ) -> Result<Ipv4Addr, CliError> {
     if let Some(vm_ip) = vm_ip {
         eprintln!("debug: using explicitly provided VM IP: {}", vm_ip);
@@ -583,7 +643,7 @@ fn resolve_vm_ip(
 
     loop {
         // First check if the VM is even running
-        if !is_vm_running(state_dir) {
+        if !vm_is_running(state_dir) {
             let ready_sock = state_dir.join("ready.sock");
             let mut reason = "VM is not running (checked PID file)".to_string();
             if !ready_sock.exists() {
@@ -735,6 +795,7 @@ fn cmd_autoconfigure_with_runner<R: IncusRunner>(
     incus_conf: Option<PathBuf>,
     lease_path: &Path,
     runner: &mut R,
+    vm_is_running: &dyn Fn(&Path) -> bool,
 ) -> Result<(), CliError> {
     if !valid_mount_name(&remote_name) {
         return Err(CliError::InvalidRemoteName(remote_name));
@@ -751,12 +812,12 @@ fn cmd_autoconfigure_with_runner<R: IncusRunner>(
     fs::copy(&pki_paths.client_cert, incus_conf_dir.join("client.crt"))?;
     fs::copy(&pki_paths.client_key, incus_conf_dir.join("client.key"))?;
 
-    if !is_vm_running(state_dir) {
+    if !vm_is_running(state_dir) {
         println!("VM is not running; starting it now...");
         cmd_start(state_dir)?;
     }
 
-    let vm_ip = resolve_vm_ip(vm_ip, lease_path, state_dir)?;
+    let vm_ip = resolve_vm_ip(vm_ip, lease_path, state_dir, vm_is_running)?;
     let remote_url = format!("https://{vm_ip}:{DEFAULT_INCUS_HTTPS_PORT}");
 
     let remote_list = runner.run(&incus_conf_dir, &["remote", "list", "--format", "csv"])?;
@@ -795,6 +856,7 @@ fn cmd_autoconfigure(
         incus_conf,
         Path::new(DEFAULT_DHCP_LEASES_PATH),
         &mut runner,
+        &is_vm_running,
     )
 }
 
@@ -909,9 +971,38 @@ mod tests {
         fs::write(pki_dir.join("client.key"), "KEY").expect("client key fixture should be writable");
     }
 
-    fn write_test_pid(state_dir: &Path) {
-        fs::write(state_dir.join("vfkit.pid"), std::process::id().to_string())
-            .expect("mock pid file should be writable");
+    /// Stands in for a booted VM. Liveness is a real process probe in production,
+    /// so tests state the precondition directly instead of forging a PID file.
+    fn vm_is_running_stub(_state_dir: &Path) -> bool {
+        true
+    }
+
+    #[test]
+    fn a_zombie_is_not_a_running_vm() {
+        // vfkit that dies on startup stays visible until reaped, and `kill -0`
+        // succeeds on it — which is what let a rejected argv masquerade as a
+        // booting VM for the full discovery timeout.
+        assert!(!describes_live_vfkit("Z+ /opt/homebrew/bin/vfkit"));
+        assert!(!describes_live_vfkit("Z /opt/homebrew/bin/vfkit"));
+    }
+
+    #[test]
+    fn a_live_vfkit_in_any_scheduler_state_is_running() {
+        for stat in ["S", "S+", "R", "R+", "U", "SN"] {
+            assert!(
+                describes_live_vfkit(&format!("{stat} /opt/homebrew/bin/vfkit")),
+                "state {stat} should count as running"
+            );
+        }
+    }
+
+    #[test]
+    fn a_recycled_pid_belonging_to_another_program_is_not_our_vm() {
+        // A stale `vfkit.pid` from a previous boot can name a PID the OS has
+        // since handed to something else.
+        assert!(!describes_live_vfkit("S+ /usr/bin/ssh"));
+        assert!(!describes_live_vfkit(""));
+        assert!(!describes_live_vfkit("S+"));
     }
 
     #[test]
@@ -960,7 +1051,6 @@ mod tests {
     fn autoconfigure_copies_certs_and_wires_remote() {
         let temp = TempDir::new("autoconfigure-copy");
         write_test_pki(&temp.path);
-        write_test_pid(&temp.path);
 
         let incus_conf = temp.path.join("incus-conf");
         let lease_path = temp.path.join("dhcpd_leases");
@@ -976,6 +1066,7 @@ mod tests {
             Some(incus_conf.clone()),
             &lease_path,
             &mut runner,
+            &vm_is_running_stub,
         )
         .expect("autoconfigure should succeed");
 
@@ -1010,7 +1101,6 @@ mod tests {
     fn autoconfigure_uses_lease_when_vm_ip_is_not_passed() {
         let temp = TempDir::new("autoconfigure-lease");
         write_test_pki(&temp.path);
-        write_test_pid(&temp.path);
 
         let incus_conf = temp.path.join("incus-conf");
         let lease_path = temp.path.join("dhcpd_leases");
@@ -1029,6 +1119,7 @@ mod tests {
             Some(incus_conf),
             &lease_path,
             &mut runner,
+            &vm_is_running_stub,
         )
         .expect("autoconfigure should resolve vm ip from leases");
 
@@ -1048,7 +1139,6 @@ mod tests {
     fn autoconfigure_skips_remote_add_when_remote_exists() {
         let temp = TempDir::new("autoconfigure-existing");
         write_test_pki(&temp.path);
-        write_test_pid(&temp.path);
 
         let incus_conf = temp.path.join("incus-conf");
         let lease_path = temp.path.join("dhcpd_leases");
@@ -1067,6 +1157,7 @@ mod tests {
             Some(incus_conf),
             &lease_path,
             &mut runner,
+            &vm_is_running_stub,
         )
         .expect("autoconfigure should succeed when remote already exists");
 
@@ -1087,6 +1178,7 @@ mod tests {
             Some(temp.path.join("incus-conf")),
             Path::new("/unused"),
             &mut runner,
+            &vm_is_running_stub,
         )
         .expect_err("autoconfigure should fail when pki is missing");
 
@@ -1097,7 +1189,6 @@ mod tests {
     fn autoconfigure_requires_vm_ip_when_lease_has_no_match() {
         let temp = TempDir::new("autoconfigure-missing-ip");
         write_test_pki(&temp.path);
-        write_test_pid(&temp.path);
 
         let lease_path = temp.path.join("dhcpd_leases");
         fs::write(
@@ -1115,6 +1206,7 @@ mod tests {
             Some(temp.path.join("incus-conf")),
             &lease_path,
             &mut runner,
+            &vm_is_running_stub,
         )
         .expect_err("autoconfigure should fail when lease lookup has no matching MAC");
 
@@ -1125,7 +1217,6 @@ mod tests {
     fn autoconfigure_requires_vm_ip_when_lease_file_is_missing() {
         let temp = TempDir::new("autoconfigure-missing-lease-file");
         write_test_pki(&temp.path);
-        write_test_pid(&temp.path);
 
         let mut runner = FakeIncusRunner::default();
 
@@ -1136,6 +1227,7 @@ mod tests {
             Some(temp.path.join("incus-conf")),
             &temp.path.join("missing_dhcpd_leases"),
             &mut runner,
+            &vm_is_running_stub,
         )
         .expect_err("autoconfigure should fail when lease file is missing");
 
@@ -1156,6 +1248,7 @@ mod tests {
             Some(temp.path.join("incus-conf")),
             Path::new("/unused"),
             &mut runner,
+            &vm_is_running_stub,
         )
         .expect_err("invalid remote name should fail");
 
