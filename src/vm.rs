@@ -27,6 +27,7 @@ pub struct VmSpec {
     pub mac: String,
     pub user_data: PathBuf,
     pub meta_data: PathBuf,
+    pub network_config: Option<PathBuf>,
     /// Host-side Unix socket the guest connects to when provisioning finishes.
     pub ready_socket: PathBuf,
     /// vsock port matching `ready_socket`.
@@ -34,6 +35,7 @@ pub struct VmSpec {
     /// Port for vfkit's plain-HTTP control API on localhost.
     pub restful_port: u16,
     pub shares: Vec<Share>,
+    pub serial_log: Option<PathBuf>,
 }
 
 fn path_arg(path: &Path) -> String {
@@ -53,17 +55,19 @@ pub fn build_args(spec: &VmSpec) -> Vec<String> {
         "--bootloader".to_string(),
         format!("efi,variable-store={},create", path_arg(&spec.efi_store)),
         "--device".to_string(),
-        format!("virtio-blk,path={}", path_arg(&spec.root_disk)),
+        format!("virtio-blk,path={},devName=vda", path_arg(&spec.root_disk)),
         "--device".to_string(),
-        format!("virtio-blk,path={}", path_arg(&spec.pool_disk)),
+        format!("virtio-blk,path={},devName=vdb", path_arg(&spec.pool_disk)),
         "--device".to_string(),
         format!("virtio-net,nat,mac={}", spec.mac),
         "--device".to_string(),
         format!(
-            "virtio-vsock,port={},socketURL={}",
+            "virtio-vsock,port={},socketURL={},listen",
             spec.ready_port,
             path_arg(&spec.ready_socket)
         ),
+        "--device".to_string(),
+        "virtio-rng".to_string(),
     ];
 
     for share in &spec.shares {
@@ -85,6 +89,14 @@ pub fn build_args(spec: &VmSpec) -> Vec<String> {
     args.push("--restful-uri".to_string());
     args.push(format!("tcp://localhost:{}", spec.restful_port));
 
+    args.push("--kernel-cmdline".to_string());
+    args.push("console=hvc0".to_string());
+
+    if let Some(serial_log) = &spec.serial_log {
+        args.push("--device".to_string());
+        args.push(format!("virtio-serial,logFilePath={}", path_arg(serial_log)));
+    }
+
     args
 }
 
@@ -103,10 +115,12 @@ mod tests {
             mac: "52:54:00:12:34:56".to_string(),
             user_data: PathBuf::from("/s/user-data"),
             meta_data: PathBuf::from("/s/meta-data"),
+            network_config: None,
             ready_socket: PathBuf::from("/s/ready.sock"),
             ready_port: 5,
             restful_port: 8081,
             shares: Vec::new(),
+            serial_log: None,
         }
     }
 
@@ -124,17 +138,21 @@ mod tests {
                 "--bootloader",
                 "efi,variable-store=/s/efi-store,create",
                 "--device",
-                "virtio-blk,path=/s/root.raw",
+                "virtio-blk,path=/s/root.raw,devName=vda",
                 "--device",
-                "virtio-blk,path=/s/pool.raw",
+                "virtio-blk,path=/s/pool.raw,devName=vdb",
                 "--device",
                 "virtio-net,nat,mac=52:54:00:12:34:56",
                 "--device",
-                "virtio-vsock,port=5,socketURL=/s/ready.sock",
+                "virtio-vsock,port=5,socketURL=/s/ready.sock,listen",
+                "--device",
+                "virtio-rng",
                 "--cloud-init",
                 "/s/user-data,/s/meta-data",
                 "--restful-uri",
                 "tcp://localhost:8081",
+                "--kernel-cmdline",
+                "console=hvc0",
             ]
         );
     }
@@ -210,6 +228,22 @@ mod tests {
         assert!(
             beta_idx < cloud_init_idx,
             "all share devices should precede --cloud-init: {args:?}"
+        );
+    }
+
+    #[test]
+    fn serial_log_adds_a_virtio_serial_device() {
+        let spec = VmSpec {
+            serial_log: Some(PathBuf::from("/tmp/guest.log")),
+            ..spec()
+        };
+
+        let args = build_args(&spec);
+        let devices = devices(&args);
+
+        assert!(
+            devices.contains(&"virtio-serial,logFilePath=/tmp/guest.log".to_string()),
+            "missing virtio-serial device for the log, got: {devices:?}"
         );
     }
 }

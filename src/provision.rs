@@ -16,6 +16,8 @@ pub struct ProvisionSpec {
     pub server_cert_pem: String,
     pub server_key_pem: String,
     pub mounts: Vec<MountSpec>,
+    /// Optional tag for the state directory share, used for IP discovery.
+    pub state_tag: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -54,6 +56,9 @@ fn validate(spec: &ProvisionSpec) -> Result<(), ProvisionError> {
     for mount in &spec.mounts {
         validate_mount_tag(&mount.tag)?;
     }
+    if let Some(tag) = &spec.state_tag {
+        validate_mount_tag(tag)?;
+    }
     Ok(())
 }
 
@@ -72,28 +77,26 @@ fn render_preseed(bridge_cidr: &str) -> String {
     )
 }
 
-fn render_fstab_mounts(mounts: &[MountSpec]) -> String {
-    let mut fstab = String::new();
-    for mount in mounts {
-        let _ = writeln!(
-            fstab,
-            "{} /mnt/mac/{} virtiofs defaults,_netdev 0 0",
-            mount.tag, mount.tag
-        );
-    }
-    fstab
-}
 
 /// Render cloud-init `user-data` to install Incus and bootstrap host integration.
 pub fn render_user_data(spec: &ProvisionSpec) -> Result<String, ProvisionError> {
     validate(spec)?;
 
     let preseed = render_preseed(&spec.bridge_cidr);
-    let fstab_mounts = render_fstab_mounts(&spec.mounts);
 
     let mut out = String::new();
-
     out.push_str("#cloud-config\n");
+    out.push_str("output: {all: '| tee /dev/hvc0'}\n");
+
+    if let Some(nc) = render_network_config() {
+        out.push_str("network:\n");
+        push_block(&mut out, 2, &nc);
+    }
+
+    out.push_str("bootcmd:\n");
+    out.push_str("  - [sh, -c, \"echo $(date) bootcmd started > /dev/hvc0\"]\n");
+    out.push_str("  - [ modprobe, virtio_console ]\n");
+    out.push_str("  - [ modprobe, virtiofs ]\n");
     out.push_str("write_files:\n");
     out.push_str("  - path: /var/lib/incus/server.crt\n");
     out.push_str("    permissions: \"0644\"\n");
@@ -115,24 +118,49 @@ pub fn render_user_data(spec: &ProvisionSpec) -> Result<String, ProvisionError> 
     out.push_str("    content: |\n");
     push_block(&mut out, 6, &preseed);
 
-    if !spec.mounts.is_empty() {
-        out.push_str("  - path: /etc/fstab.d/malleus-mounts\n");
-        out.push_str("    permissions: \"0644\"\n");
-        out.push_str("    content: |\n");
-        push_block(&mut out, 6, &fstab_mounts);
+    if !spec.mounts.is_empty() || spec.state_tag.is_some() {
+        out.push_str("mounts:\n");
+        for mount in &spec.mounts {
+            let _ = writeln!(
+                out,
+                "  - [ \"{}\", \"/mnt/mac/{}\", \"virtiofs\", \"defaults,_netdev\", \"0\", \"0\" ]",
+                mount.tag, mount.tag
+            );
+        }
+        if let Some(tag) = &spec.state_tag {
+            let _ = writeln!(
+                out,
+                "  - [ \"{}\", \"/mnt/mac/{}\", \"virtiofs\", \"defaults,_netdev\", \"0\", \"0\" ]",
+                tag, tag
+            );
+        }
     }
 
     out.push_str("runcmd:\n");
+    out.push_str("  - [sh, -c, \"echo $(date) [malleus] runcmd started > /dev/hvc0\"]\n");
+    out.push_str("  - [sh, -c, \"dmesg | grep -iE 'virtio|eth0|enp' > /dev/hvc0\"]\n");
+    if let Some(tag) = &spec.state_tag {
+        out.push_str(
+            "  - [sh, -c, \"(while true; do TAG=\\\"$1\\\"; DIR=\\\"/mnt/mac/$TAG\\\"; echo \\\"$(date) [malleus] checking network and mounting $TAG\\\" > /dev/hvc0; mkdir -p \\\"$DIR\\\"; if ! mountpoint -q \\\"$DIR\\\"; then mount -t virtiofs \\\"$TAG\\\" \\\"$DIR\\\" || echo \\\"$(date) [malleus] virtio-fs mount failed\\\" > /dev/hvc0; fi; if [ -d \\\"$DIR\\\" ]; then IP=$(ip -4 addr show | grep 'inet ' | grep -v '127.0.0.1' | head -n 1 | awk '{print $2}' | cut -d/ -f1); if [ -n \\\"$IP\\\" ]; then echo \\\"$IP\\\" > \\\"$DIR\\\"/guest-ip; echo \\\"Reported IP $IP via virtio-fs\\\" | tee -a \\\"$DIR\\\"/guest-ip.log > /dev/hvc0; break; fi; fi; sleep 2; done) &\", \"\", \"",
+        );
+        out.push_str(tag);
+        out.push_str("\"]\n");
+    }
+
+    out.push_str(
+        "  - [sh, -c, \"(while true; do IP=$(ip -4 addr show | grep 'inet ' | grep -v '127.0.0.1' | head -n 1 | awk '{print $2}' | cut -d/ -f1); if [ -n \\\"$IP\\\" ]; then echo \\\"[malleus] Network is UP with IP $IP\\\" > /dev/hvc0; ping -c 1 192.168.64.1 > /dev/hvc0 2>&1 || echo \\\"[malleus] Host ping failed\\\" > /dev/hvc0; if command -v socat >/dev/null 2>&1; then echo \\\"Reported IP $IP via vsock\\\" > /dev/hvc0; echo \\\"$IP\\\" | socat - VSOCK-LISTEN:5,reuseaddr; break; fi; fi; sleep 2; done) &\", \"\", \"\"]\n",
+    );
+
     out.push_str("  - [mkdir, -p, /etc/apt/keyrings]\n");
     out.push_str(
-        "  - [sh, -lc, \"curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc\"]\n",
+        "  - [sh, -c, \"curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc\"]\n",
     );
     out.push_str(
-        "  - [sh, -lc, \"echo 'deb [signed-by=/etc/apt/keyrings/zabbly.asc] https://pkgs.zabbly.com/incus/stable /' > /etc/apt/sources.list.d/zabbly-incus-stable.list\"]\n",
+        "  - [sh, -c, \"echo 'deb [signed-by=/etc/apt/keyrings/zabbly.asc] https://pkgs.zabbly.com/incus/stable /' > /etc/apt/sources.list.d/zabbly-incus-stable.list\"]\n",
     );
     out.push_str("  - [apt-get, update]\n");
-    out.push_str("  - [apt-get, install, -y, incus]\n");
-    out.push_str("  - [sh, -lc, \"incus admin init --preseed < /var/lib/malleus/preseed.yaml\"]\n");
+    out.push_str("  - [apt-get, install, -y, incus, socat]\n");
+    out.push_str("  - [sh, -c, \"incus admin init --preseed < /var/lib/malleus/preseed.yaml\"]\n");
     out.push_str(
         "  - [incus, config, trust, add-certificate, /var/lib/malleus/client.crt, --name, malleus-client, --type, client]\n",
     );
@@ -171,6 +199,7 @@ mod tests {
             server_key_pem:
                 "-----BEGIN PRIVATE KEY-----\nKEY\n-----END PRIVATE KEY-----\n".to_string(),
             mounts: Vec::new(),
+            state_tag: None,
         }
     }
 
@@ -219,7 +248,7 @@ mod tests {
     }
 
     #[test]
-    fn mounts_render_fstab_entries_and_mountpoint_creation() {
+    fn mounts_render_cloud_init_mounts_module() {
         let mut spec = spec();
         spec.mounts = vec![
             MountSpec {
@@ -232,12 +261,9 @@ mod tests {
 
         let user_data = render_user_data(&spec).expect("user-data should render");
 
-        assert!(user_data.contains("path: /etc/fstab.d/malleus-mounts"));
-        assert!(user_data.contains("code /mnt/mac/code virtiofs defaults,_netdev 0 0"));
-        assert!(user_data.contains("data /mnt/mac/data virtiofs defaults,_netdev 0 0"));
-        assert!(user_data.contains("[mkdir, -p, /mnt/mac/code]"));
-        assert!(user_data.contains("[mkdir, -p, /mnt/mac/data]"));
-        assert!(user_data.contains("[mount, -a]"));
+        assert!(user_data.contains("mounts:"));
+        assert!(user_data.contains("[ \"code\", \"/mnt/mac/code\", \"virtiofs\", \"defaults,_netdev\", \"0\", \"0\" ]"));
+        assert!(user_data.contains("[ \"data\", \"/mnt/mac/data\", \"virtiofs\", \"defaults,_netdev\", \"0\", \"0\" ]"));
     }
 
     #[test]
@@ -251,4 +277,30 @@ mod tests {
 
         assert_eq!(err, ProvisionError::InvalidMountTag("bad/tag".to_string()));
     }
+
+    #[test]
+    fn state_tag_renders_mount_and_ip_reporting_script() {
+        let mut spec = spec();
+        spec.state_tag = Some("malleus-state".to_string());
+
+        let user_data = render_user_data(&spec).expect("user-data should render");
+        let network_config = render_network_config();
+
+        assert!(user_data.contains("[ \"malleus-state\", \"/mnt/mac/malleus-state\", \"virtiofs\", \"defaults,_netdev\", \"0\", \"0\" ]"));
+        assert!(user_data.contains("ip -4 addr show"));
+        assert!(user_data.contains("> \\\"$DIR\\\"/guest-ip"));
+        assert!(network_config.is_some());
+        assert!(network_config.unwrap().contains("dhcp4: true"));
+    }
+}
+/// Render cloud-init `network-config` to enable DHCP on all interfaces.
+pub fn render_network_config() -> Option<String> {
+    let mut out = String::new();
+    out.push_str("version: 2\n");
+    out.push_str("ethernets:\n");
+    out.push_str("  all:\n");
+    out.push_str("    match:\n");
+    out.push_str("      name: \"*\"\n");
+    out.push_str("    dhcp4: true\n");
+    Some(out)
 }

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod image;
 pub mod leases;
 pub mod netroute;
 pub mod pki;
